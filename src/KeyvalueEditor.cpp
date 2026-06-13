@@ -197,7 +197,24 @@ void KeyvalueEditor::setupUi() {
     connect(removeChoice, &QPushButton::clicked, this, &KeyvalueEditor::removeChoiceItem);
     connect(addFlag, &QPushButton::clicked, this, &KeyvalueEditor::addFlagItem);
     connect(removeFlag, &QPushButton::clicked, this, &KeyvalueEditor::removeFlagItem);
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::accepted, this, [this]{
+        QString name = m_name->text().trimmed();
+        if (name.isEmpty()) {
+            QMessageBox::warning(this, "Validation", "Keyvalue name cannot be empty.");
+            return;
+        }
+        if (name.length() > 30) {
+            QMessageBox::warning(this, "Validation",
+                QString("Keyvalue name '%1' is %2 characters long. Source engine supports max 30 characters.").arg(name).arg(name.length()));
+            return;
+        }
+        if (name.contains('.') || name.contains('#')) {
+            QMessageBox::warning(this, "Validation",
+                QString("Keyvalue name '%1' contains '.' or '#'. These characters do not work correctly in Source FGD files.").arg(name));
+            return;
+        }
+        accept();
+    });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 }
 
@@ -226,7 +243,7 @@ void KeyvalueEditor::removeChoiceItem() {
 
 void KeyvalueEditor::addFlagItem() {
     int row = m_flagsTable->rowCount();
-    int bitVal = (row == 0) ? 1 : (1 << row);
+    quint64 bitVal = (row == 0) ? 1ULL : (1ULL << row);
     m_flagsTable->insertRow(row);
     m_flagsTable->setItem(row, 0, new QTableWidgetItem(QString::number(bitVal)));
     m_flagsTable->setItem(row, 1, new QTableWidgetItem("Flag " + QString::number(row + 1)));
