@@ -11,13 +11,12 @@
 #include <QLabel>
 #include <QHeaderView>
 #include <QMessageBox>
-#include <QButtonGroup>
 
 EntityEditor::EntityEditor(QWidget *parent, const FGDEntity &entity, const QStringList &knownBases)
     : QDialog(parent), m_knownBases(knownBases)
 {
     setWindowTitle("Entity Editor");
-    setMinimumSize(720, 780);
+    setMinimumSize(720, 820);
     setupUi();
     populateFrom(entity);
 }
@@ -54,7 +53,7 @@ void EntityEditor::setupUi() {
     m_description->setToolTip(
         "Description shown in Hammer's Help box when the mapper clicks 'Help'.\n"
         "Use \\n for line breaks. Do not use quotation marks (use apostrophes instead).\n"
-        "Lines longer than 125 characters will be split automatically in the FGD output."
+        "Lines longer than 120 characters will be split automatically in the FGD output."
     );
 
     form->addRow("Class type:", m_classType);
@@ -64,7 +63,7 @@ void EntityEditor::setupUi() {
     m_color = new QLineEdit;
     m_color->setPlaceholderText("R G B  e.g. 255 128 0");
     m_color->setToolTip(
-        "Color of the entity wireframe box in Hammer's 2D views (R G B, each 0–255).\n"
+        "Color of the entity wireframe box in Hammer's 2D views (R G B, each 0-255).\n"
         "If omitted, defaults to magenta (220 30 220).\n"
         "Note: does not affect color in Hammer 4.x (only text color); fixed in Hammer++."
     );
@@ -85,78 +84,49 @@ void EntityEditor::setupUi() {
     form->addRow("Size:", m_size);
     form->addRow("", m_halfGridSnap);
 
-    QGroupBox *modelGroup = new QGroupBox("Model / Sprite helper");
+    QGroupBox *modelGroup = new QGroupBox("Model / Sprite helpers");
     modelGroup->setToolTip(
         "Controls how this entity is displayed in the map editor's 3D view.\n"
-        "Only one of these can be active at a time.\n\n"
+        "studio(), studioprop(), and iconsprite() can be combined independently.\n\n"
         "studio() - display a model; uses entity's 'model' KV if path is empty\n"
         "studioprop() - like studio(), but uses the model's own bounding box\n"
-        "iconsprite() - display a sprite icon (VMT in Source, SPR in GoldSrc)\n"
-        "None - show only the colored bounding box defined by size()"
+        "iconsprite() - display a sprite icon; can be used alongside studio()"
     );
-    QVBoxLayout *modelLayout = new QVBoxLayout(modelGroup);
+    QFormLayout *modelForm = new QFormLayout(modelGroup);
 
-    QHBoxLayout *radioRow = new QHBoxLayout;
-    m_noModel       = new QRadioButton("None");
-    m_useStudio     = new QRadioButton("studio()");
-    m_useStudioprop = new QRadioButton("studioprop()");
-    m_useIconSprite = new QRadioButton("iconsprite()");
-    m_noModel->setChecked(true);
-    m_noModel->setToolTip("No model helper; entity is shown as a colored bounding box.");
-    m_useStudio->setToolTip(
-        "studio(\"path\") - display a model in the 3D view.\n"
-        "Affected by sequence, skin, rendercolor, etc.\n"
-        "If path is empty, uses the entity's 'model' keyvalue."
-    );
-    m_useStudioprop->setToolTip(
-        "studioprop(\"path\") - like studio(), but uses the model's bounding box instead of size().\n"
-        "Required for entities with 'angles' that should be rotatable with the mouse in Hammer."
-    );
-    m_useIconSprite->setToolTip(
-        "iconsprite(\"path\") - display a sprite icon in the 3D view.\n"
-        "Uses VMT in Hammer 4.x, VMAT in Hammer 5.x, SPR in other editors.\n"
-        "Scaled to fit size(). Can be used alongside studio()."
-    );
-    radioRow->addWidget(m_noModel);
-    radioRow->addWidget(m_useStudio);
-    radioRow->addWidget(m_useStudioprop);
-    radioRow->addWidget(m_useIconSprite);
-    radioRow->addStretch();
-    modelLayout->addLayout(radioRow);
-
-    m_modelStack = new QStackedWidget;
-
-    QWidget *noModelPage = new QWidget;
-    m_modelStack->addWidget(noModelPage);
-
-    QWidget *studioPage = new QWidget;
-    QHBoxLayout *studioRow = new QHBoxLayout(studioPage);
-    studioRow->setContentsMargins(0,0,0,0);
-    studioRow->addWidget(new QLabel("Path:"));
+    m_useStudio = new QCheckBox("studio()");
+    m_useStudio->setToolTip("Display a model in the 3D view. If path is empty, uses the entity's 'model' keyvalue.");
     m_studioModel = new QLineEdit;
-    m_studioModel->setPlaceholderText("e.g. models/combine_soldier.mdl  (leave empty to use 'model' KV)");
-    studioRow->addWidget(m_studioModel);
-    m_modelStack->addWidget(studioPage);
+    m_studioModel->setPlaceholderText("e.g. models/combine_soldier.mdl  (empty = use 'model' KV)");
+    m_studioModel->setEnabled(false);
+    connect(m_useStudio, &QCheckBox::toggled, m_studioModel, &QLineEdit::setEnabled);
+    QHBoxLayout *studioRow = new QHBoxLayout;
+    studioRow->addWidget(m_useStudio);
+    studioRow->addWidget(m_studioModel, 1);
+    modelForm->addRow(studioRow);
 
-    QWidget *studiopropPage = new QWidget;
-    QHBoxLayout *studiopropRow = new QHBoxLayout(studiopropPage);
-    studiopropRow->setContentsMargins(0,0,0,0);
-    studiopropRow->addWidget(new QLabel("Path:"));
+    m_useStudioprop = new QCheckBox("studioprop()");
+    m_useStudioprop->setToolTip("Like studio(), but uses the model's bounding box instead of size().\nRequired for entities with 'angles' that should be rotatable with the mouse in Hammer.");
     m_studiopropModel = new QLineEdit;
-    m_studiopropModel->setPlaceholderText("e.g. models/props/barrel.mdl  (leave empty to use 'model' KV)");
-    studiopropRow->addWidget(m_studiopropModel);
-    m_modelStack->addWidget(studiopropPage);
+    m_studiopropModel->setPlaceholderText("e.g. models/props/barrel.mdl  (empty = use 'model' KV)");
+    m_studiopropModel->setEnabled(false);
+    connect(m_useStudioprop, &QCheckBox::toggled, m_studiopropModel, &QLineEdit::setEnabled);
+    QHBoxLayout *studiopropRow = new QHBoxLayout;
+    studiopropRow->addWidget(m_useStudioprop);
+    studiopropRow->addWidget(m_studiopropModel, 1);
+    modelForm->addRow(studiopropRow);
 
-    QWidget *iconSpritePage = new QWidget;
-    QHBoxLayout *iconSpriteRow = new QHBoxLayout(iconSpritePage);
-    iconSpriteRow->setContentsMargins(0,0,0,0);
-    iconSpriteRow->addWidget(new QLabel("Path:"));
+    m_useIconSprite = new QCheckBox("iconsprite()");
+    m_useIconSprite->setToolTip("Display a sprite icon in the 3D view. Can be used alongside studio()/studioprop().\nUses VMT in Hammer 4.x, VMAT in Hammer 5.x, SPR in other editors.");
     m_iconSprite = new QLineEdit;
     m_iconSprite->setPlaceholderText("e.g. editor/env_cubemap.vmt");
-    iconSpriteRow->addWidget(m_iconSprite);
-    m_modelStack->addWidget(iconSpritePage);
+    m_iconSprite->setEnabled(false);
+    connect(m_useIconSprite, &QCheckBox::toggled, m_iconSprite, &QLineEdit::setEnabled);
+    QHBoxLayout *iconSpriteRow = new QHBoxLayout;
+    iconSpriteRow->addWidget(m_useIconSprite);
+    iconSpriteRow->addWidget(m_iconSprite, 1);
+    modelForm->addRow(iconSpriteRow);
 
-    modelLayout->addWidget(m_modelStack);
     form->addRow("", modelGroup);
 
     QGroupBox *extraHelpers = new QGroupBox("Additional helpers");
@@ -165,62 +135,57 @@ void EntityEditor::setupUi() {
 
     m_sphere = new QLineEdit;
     m_sphere->setPlaceholderText("property name, e.g. radius");
-    m_sphere->setToolTip(
-        "sphere(propertyname) - draws a sphere around the entity in 2D and 3D views.\n"
-        "The sphere's radius is taken from the named keyvalue.\n"
-        "Supported in Hammer 4.x."
-    );
+    m_sphere->setToolTip("sphere(propertyname) - draws a sphere around the entity. Radius taken from the named KV.");
+
     m_line = new QLineEdit;
     m_line->setPlaceholderText("e.g. 255 255 255, targetname, target, target, entity");
-    m_line->setToolTip(
-        "line(color, start_key, start_value, end_key, end_value) - draws a line between two entities.\n"
-        "Color is R G B. The value properties give the targetname to look for on the target entity.\n"
-        "Supported in Hammer 4.x. Note: color value is always treated as 255 0 255 (ignored)."
-    );
+    m_line->setToolTip("line(color, start_key, start_value, end_key, end_value) - draws a line between two entities.");
+
     m_vecline = new QLineEdit;
     m_vecline->setPlaceholderText("property name");
-    m_vecline->setToolTip(
-        "vecline(property) - positions a vector property and draws a line from the entity to it.\n"
-        "Supported in Hammer 4.x."
-    );
+    m_vecline->setToolTip("vecline(property) - positions a vector property and draws a line from the entity to it.");
+
     m_axis = new QLineEdit;
     m_axis->setPlaceholderText("property name");
-    m_axis->setToolTip(
-        "axis(property) - positions two points joined by a line in the map.\n"
-        "The property is set to 'x1 y1 z1, x2 y2 z2' by default.\n"
-        "Supported in Hammer 4.x."
-    );
+    m_axis->setToolTip("axis(property) - positions two points joined by a line in the map.");
+
     m_wirebox = new QLineEdit;
     m_wirebox->setPlaceholderText("e.g. mins, maxs");
-    m_wirebox->setToolTip(
-        "wirebox(min, max) - draws a bounding box between two properties.\n"
-        "origin() helpers should also be defined to allow moving the points.\n"
-        "Supported in Hammer 4.x."
-    );
+    m_wirebox->setToolTip("wirebox(min, max) - draws a bounding box between two properties.");
+
+    m_origin = new QLineEdit;
+    m_origin->setPlaceholderText("property name, e.g. origin");
+    m_origin->setToolTip("origin(property) - allows positioning a vector property in the map. Updates when entity is moved.");
+
+    m_lightprop = new QLineEdit;
+    m_lightprop->setPlaceholderText("e.g. models/props/light.mdl");
+    m_lightprop->setToolTip("lightprop(\"path\") - like studioprop(), but pitch of the model is inverted. Hammer 4.x.");
 
     extraForm->addRow("sphere():", m_sphere);
     extraForm->addRow("line():", m_line);
     extraForm->addRow("vecline():", m_vecline);
     extraForm->addRow("axis():", m_axis);
     extraForm->addRow("wirebox():", m_wirebox);
+    extraForm->addRow("origin():", m_origin);
+    extraForm->addRow("lightprop():", m_lightprop);
 
     QHBoxLayout *flagHelpers = new QHBoxLayout;
-    m_decal       = new QCheckBox("decal()");
-    m_overlay     = new QCheckBox("overlay()");
-    m_sprite      = new QCheckBox("sprite()");
+    m_decal           = new QCheckBox("decal()");
+    m_overlay         = new QCheckBox("overlay()");
+    m_sprite          = new QCheckBox("sprite()");
     m_sweptplayerhull = new QCheckBox("sweptplayerhull()");
-    m_instance_   = new QCheckBox("instance()");
-    m_animator    = new QCheckBox("animator()");
-    m_keyframe_   = new QCheckBox("keyframe()");
-    m_worldtext   = new QCheckBox("worldtext()");
+    m_instance_       = new QCheckBox("instance()");
+    m_animator        = new QCheckBox("animator()");
+    m_keyframe_       = new QCheckBox("keyframe()");
+    m_worldtext       = new QCheckBox("worldtext()");
 
     m_decal->setToolTip("Renders decals on nearby surfaces. Uses the 'texture' KV for the material.");
     m_overlay->setToolTip("Renders overlays on a surface. Used for info_overlay. Auto-sets UV corner KVs.");
     m_sprite->setToolTip("Renders the sprite material from the 'model' KV (env_sprite and variants).");
-    m_sweptplayerhull->setToolTip("Draws 32x32x72 rectangular prisms at point0 and point1 to show movement space. Hammer 4.x.");
-    m_instance_->setToolTip("Renders the instance VMF in the map. Generates additional KVs for instance parameters. Hammer 4.x.");
-    m_animator->setToolTip("Used with @MoveClass to mark this entity as the first in a chain. Hammer 4.x.");
-    m_keyframe_->setToolTip("Automatically renames this entity when cloned. Hammer 4.x.");
+    m_sweptplayerhull->setToolTip("Draws 32x32x72 rectangular prisms at point0 and point1 to show movement space.");
+    m_instance_->setToolTip("Renders the instance VMF in the map. Generates additional KVs for instance parameters.");
+    m_animator->setToolTip("Used with @MoveClass to mark this entity as the first in a chain.");
+    m_keyframe_->setToolTip("Automatically renames this entity when cloned.");
     m_worldtext->setToolTip("Displays the 'message' KV contents in the 3D viewport. Hammer 4.x / Strata.");
 
     flagHelpers->addWidget(m_decal);
@@ -240,11 +205,7 @@ void EntityEditor::setupUi() {
     QGroupBox *basesGroup = new QGroupBox("Base classes");
     basesGroup->setToolTip(
         "Attach previously defined @BaseClass entities to inherit their keyvalues and helpers.\n"
-        "Multiple bases can be specified. Common base classes include:\n"
-        "  Targetname - adds the 'targetname' KV\n"
-        "  Angles - adds pitch/yaw/roll KVs\n"
-        "  Origin - adds the origin KV\n"
-        "  Parentname - adds the 'parentname' KV"
+        "Multiple bases can be specified."
     );
     QVBoxLayout *basesLayout = new QVBoxLayout(basesGroup);
     m_baseList = new QListWidget;
@@ -321,10 +282,6 @@ void EntityEditor::setupUi() {
     QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     mainLayout->addWidget(buttons);
 
-    connect(m_noModel,       &QRadioButton::toggled, this, &EntityEditor::onModelModeChanged);
-    connect(m_useStudio,     &QRadioButton::toggled, this, &EntityEditor::onModelModeChanged);
-    connect(m_useStudioprop, &QRadioButton::toggled, this, &EntityEditor::onModelModeChanged);
-    connect(m_useIconSprite, &QRadioButton::toggled, this, &EntityEditor::onModelModeChanged);
     connect(addBaseBtn, &QPushButton::clicked, this, &EntityEditor::addBase);
     connect(removeBaseBtn, &QPushButton::clicked, this, &EntityEditor::removeBase);
     connect(addKV, &QPushButton::clicked, this, &EntityEditor::addKeyvalue);
@@ -337,13 +294,6 @@ void EntityEditor::setupUi() {
     connect(m_ioTable, &QTableWidget::cellDoubleClicked, this, &EntityEditor::editIO);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-}
-
-void EntityEditor::onModelModeChanged() {
-    if (m_noModel->isChecked())       m_modelStack->setCurrentIndex(0);
-    else if (m_useStudio->isChecked())     m_modelStack->setCurrentIndex(1);
-    else if (m_useStudioprop->isChecked()) m_modelStack->setCurrentIndex(2);
-    else if (m_useIconSprite->isChecked()) m_modelStack->setCurrentIndex(3);
 }
 
 void EntityEditor::populateFrom(const FGDEntity &entity) {
@@ -359,6 +309,8 @@ void EntityEditor::populateFrom(const FGDEntity &entity) {
     m_vecline->setText(entity.vecline);
     m_axis->setText(entity.axis);
     m_wirebox->setText(entity.wirebox);
+    m_origin->setText(entity.origin);
+    m_lightprop->setText(entity.lightprop);
     m_decal->setChecked(entity.decal);
     m_overlay->setChecked(entity.overlay);
     m_sprite->setChecked(entity.sprite);
@@ -368,19 +320,17 @@ void EntityEditor::populateFrom(const FGDEntity &entity) {
     m_keyframe_->setChecked(entity.keyframe_);
     m_worldtext->setChecked(entity.worldtext);
 
-    if (!entity.studioModel.isEmpty() && entity.iconSprite.isEmpty() && entity.studioprop.isEmpty()) {
-        m_useStudio->setChecked(true);
-        m_studioModel->setText(entity.studioModel);
-    } else if (!entity.studioprop.isEmpty()) {
-        m_useStudioprop->setChecked(true);
-        m_studiopropModel->setText(entity.studioprop);
-    } else if (!entity.iconSprite.isEmpty()) {
-        m_useIconSprite->setChecked(true);
-        m_iconSprite->setText(entity.iconSprite);
-    } else {
-        m_noModel->setChecked(true);
-    }
-    onModelModeChanged();
+    m_useStudio->setChecked(!entity.studioModel.isEmpty());
+    m_studioModel->setText(entity.studioModel);
+    m_studioModel->setEnabled(!entity.studioModel.isEmpty());
+
+    m_useStudioprop->setChecked(!entity.studioprop.isEmpty());
+    m_studiopropModel->setText(entity.studioprop);
+    m_studiopropModel->setEnabled(!entity.studioprop.isEmpty());
+
+    m_useIconSprite->setChecked(!entity.iconSprite.isEmpty());
+    m_iconSprite->setText(entity.iconSprite);
+    m_iconSprite->setEnabled(!entity.iconSprite.isEmpty());
 
     for (auto &b : entity.bases) m_baseList->addItem(b);
     m_keyvalues = entity.keyvalues;
@@ -507,6 +457,8 @@ FGDEntity EntityEditor::getEntity() const {
     e.vecline     = m_vecline->text().trimmed();
     e.axis        = m_axis->text().trimmed();
     e.wirebox     = m_wirebox->text().trimmed();
+    e.origin      = m_origin->text().trimmed();
+    e.lightprop   = m_lightprop->text().trimmed();
     e.decal       = m_decal->isChecked();
     e.overlay     = m_overlay->isChecked();
     e.sprite      = m_sprite->isChecked();
@@ -517,9 +469,9 @@ FGDEntity EntityEditor::getEntity() const {
     e.worldtext   = m_worldtext->isChecked();
     if (m_useStudio->isChecked())
         e.studioModel = m_studioModel->text().trimmed();
-    else if (m_useStudioprop->isChecked())
+    if (m_useStudioprop->isChecked())
         e.studioprop  = m_studiopropModel->text().trimmed();
-    else if (m_useIconSprite->isChecked())
+    if (m_useIconSprite->isChecked())
         e.iconSprite  = m_iconSprite->text().trimmed();
     for (int i = 0; i < m_baseList->count(); ++i)
         e.bases << m_baseList->item(i)->text();

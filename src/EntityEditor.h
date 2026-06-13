@@ -6,7 +6,6 @@
 #include <QListWidget>
 #include <QTableWidget>
 #include <QTextEdit>
-#include <QRadioButton>
 #include <QStackedWidget>
 #include "FGDData.h"
 
@@ -24,21 +23,18 @@ private slots:
     void removeIO();
     void addBase();
     void removeBase();
-    void onModelModeChanged();
 private:
     void setupUi();
     void populateFrom(const FGDEntity &entity);
     QComboBox *m_classType;
     QLineEdit *m_className;
     QTextEdit *m_description;
-    QRadioButton *m_useStudio;
-    QRadioButton *m_useIconSprite;
-    QRadioButton *m_useStudioprop;
-    QRadioButton *m_noModel;
-    QStackedWidget *m_modelStack;
+    QCheckBox *m_useStudio;
     QLineEdit *m_studioModel;
-    QLineEdit *m_iconSprite;
+    QCheckBox *m_useStudioprop;
     QLineEdit *m_studiopropModel;
+    QCheckBox *m_useIconSprite;
+    QLineEdit *m_iconSprite;
     QLineEdit *m_color;
     QLineEdit *m_size;
     QCheckBox *m_halfGridSnap;
@@ -47,6 +43,8 @@ private:
     QLineEdit *m_vecline;
     QLineEdit *m_axis;
     QLineEdit *m_wirebox;
+    QLineEdit *m_origin;
+    QLineEdit *m_lightprop;
     QCheckBox *m_decal;
     QCheckBox *m_overlay;
     QCheckBox *m_sprite;
