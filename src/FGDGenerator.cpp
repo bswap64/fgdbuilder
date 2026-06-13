@@ -33,19 +33,25 @@ QString FGDGenerator::generateKeyvalue(const FGDKeyvalue &kv) {
     line = "\t" + kv.name + "(" + kv.type + ")";
     if (kv.readOnly) line += " readonly";
     if (kv.report)   line += " report";
-    if (!kv.displayName.isEmpty() || !kv.defaultValue.isEmpty() || !kv.description.isEmpty()) {
+
+    bool hasDisplay = !kv.displayName.isEmpty();
+    bool hasDefault = !kv.defaultValue.isEmpty();
+    bool hasDesc    = !kv.description.isEmpty();
+
+    if (hasDisplay || hasDefault || hasDesc) {
         line += " : \"" + escapeDescription(kv.displayName) + "\"";
-        if (!kv.defaultValue.isEmpty() || !kv.description.isEmpty()) {
+        if (hasDefault || hasDesc) {
             if (kv.type == "string" || kv.type == "float") {
                 line += " : \"" + kv.defaultValue + "\"";
             } else {
-                line += kv.defaultValue.isEmpty() ? " : " : (" : " + kv.defaultValue);
+                line += hasDefault ? (" : " + kv.defaultValue) : " :";
             }
-            if (!kv.description.isEmpty()) {
+            if (hasDesc) {
                 line += " : \"" + escapeDescription(kv.description) + "\"";
             }
         }
     }
+
     if (kv.type == "choices") {
         line += " =\n\t[\n";
         for (int i = 0; i < kv.choiceItems.size(); ++i) {
@@ -70,6 +76,24 @@ QString FGDGenerator::generateIO(const FGDIO &io) {
         line += " : \"" + escapeDescription(io.description) + "\"";
     }
     return line + "\n";
+}
+
+static QString wrapDescription(const QString &desc, int lineLen) {
+    if (desc.length() <= lineLen) return " : \"" + desc + "\"";
+    QStringList parts;
+    int start = 0;
+    while (start < desc.length()) {
+        if (desc.length() - start <= lineLen) {
+            parts << desc.mid(start);
+            break;
+        }
+        int cut = start + lineLen;
+        int space = desc.lastIndexOf(' ', cut);
+        if (space <= start) space = cut;
+        parts << desc.mid(start, space - start);
+        start = space + (desc[space] == ' ' ? 1 : 0);
+    }
+    return " :\n\t\"" + parts.join("\" +\n\t\"") + "\"";
 }
 
 QString FGDGenerator::generateEntity(const FGDEntity &entity) {
@@ -97,30 +121,23 @@ QString FGDGenerator::generateEntity(const FGDEntity &entity) {
         out += " axis(" + entity.axis + ")";
     if (!entity.wirebox.isEmpty())
         out += " wirebox(" + entity.wirebox + ")";
-    if (entity.decal)          out += " decal()";
-    if (entity.overlay)        out += " overlay()";
-    if (entity.sprite)         out += " sprite()";
+    if (!entity.origin.isEmpty())
+        out += " origin(" + entity.origin + ")";
+    if (!entity.lightprop.isEmpty())
+        out += " lightprop(\"" + entity.lightprop + "\")";
+    if (entity.decal)           out += " decal()";
+    if (entity.overlay)         out += " overlay()";
+    if (entity.sprite)          out += " sprite()";
     if (entity.sweptplayerhull) out += " sweptplayerhull()";
-    if (entity.instance_)      out += " instance()";
-    if (entity.animator)       out += " animator()";
-    if (entity.keyframe_)      out += " keyframe()";
-    if (entity.worldtext)      out += " worldtext()";
-    if (entity.halfGridSnap)   out += " halfgridsnap";
+    if (entity.instance_)       out += " instance()";
+    if (entity.animator)        out += " animator()";
+    if (entity.keyframe_)       out += " keyframe()";
+    if (entity.worldtext)       out += " worldtext()";
+    if (entity.halfGridSnap)    out += " halfgridsnap";
 
     out += " = " + entity.className;
     if (!entity.description.isEmpty()) {
-        QString desc = escapeDescription(entity.description);
-        if (desc.length() > 120) {
-            QStringList parts;
-            int pos = 0;
-            while (pos < desc.length()) {
-                parts << desc.mid(pos, 120);
-                pos += 120;
-            }
-            out += " :\n\t\"" + parts.join("\" +\n\t\"") + "\"";
-        } else {
-            out += " : \"" + desc + "\"";
-        }
+        out += wrapDescription(escapeDescription(entity.description), 120);
     }
     out += "\n[\n";
     for (auto &kv : entity.keyvalues)
@@ -162,6 +179,8 @@ QString FGDGenerator::generate(const FGDProject &project) {
             out += "// " + l + "\n";
         out += "\n";
     }
+    if (project.fgdVersion > 0)
+        out += QString("@version(%1)\n\n").arg(project.fgdVersion);
     for (auto &inc : project.includes)
         out += "@include \"" + inc + "\"\n";
     if (!project.includes.isEmpty()) out += "\n";
