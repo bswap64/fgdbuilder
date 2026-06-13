@@ -1,3 +1,4 @@
+#include "DiscordRPC.h"
 #include "MainWindow.h"
 #include "EntityEditor.h"
 #include "IncludeManager.h"
@@ -5,6 +6,8 @@
 #include "AutoVisGroupEditor.h"
 #include "MapSizeDialog.h"
 #include "FGDGenerator.h"
+#include "FGDImporter.h"
+#include "FGDHighlighter.h"
 #include <QMenuBar>
 #include <QToolBar>
 #include <QAction>
@@ -28,6 +31,10 @@
 #include <QTextEdit>
 #include <QLabel>
 #include <QFileInfo>
+#include <QSettings>
+#include <QCloseEvent>
+#include <QUndoStack>
+#include <QUndoCommand>
 #include <functional>
 
 static QJsonObject kvToJson(const FGDKeyvalue &kv) {
@@ -139,6 +146,8 @@ static QJsonObject entityToJson(const FGDEntity &e) {
     o["vecline"]    = e.vecline;
     o["axis"]       = e.axis;
     o["wirebox"]    = e.wirebox;
+    o["origin"]     = e.origin;
+    o["lightprop"]  = e.lightprop;
     o["decal"]      = e.decal;
     o["overlay"]    = e.overlay;
     o["sprite"]     = e.sprite;
@@ -173,6 +182,8 @@ static FGDEntity entityFromJson(const QJsonObject &o) {
     e.vecline     = o["vecline"].toString();
     e.axis        = o["axis"].toString();
     e.wirebox     = o["wirebox"].toString();
+    e.origin      = o["origin"].toString();
+    e.lightprop   = o["lightprop"].toString();
     e.decal       = o["decal"].toBool();
     e.overlay     = o["overlay"].toBool();
     e.sprite      = o["sprite"].toBool();
@@ -186,14 +197,50 @@ static FGDEntity entityFromJson(const QJsonObject &o) {
     return e;
 }
 
+class EntityListCommand : public QUndoCommand {
+public:
+    EntityListCommand(QList<FGDEntity> *list, const QList<FGDEntity> &before, const QList<FGDEntity> &after,
+                      const QString &text, std::function<void()> refresh)
+        : QUndoCommand(text), m_list(list), m_before(before), m_after(after), m_refresh(refresh) {}
+    void undo() override { *m_list = m_before; m_refresh(); }
+    void redo() override { *m_list = m_after; m_refresh(); }
+private:
+    QList<FGDEntity> *m_list;
+    QList<FGDEntity> m_before, m_after;
+    std::function<void()> m_refresh;
+};
+
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle("FGDBuilder");
     setWindowIcon(QIcon(":/icons/app.png"));
     setMinimumSize(900, 600);
+    m_undoStack = new QUndoStack(this);
     setupUi();
     setupMenuBar();
     setupToolBar();
     statusBar()->addWidget(m_statusLabel = new QLabel("Ready"));
+
+    QSettings settings("FGDBuilder", "FGDBuilder");
+    m_recentFiles = settings.value("recentFiles").toStringList();
+    updateRecentFilesMenu();
+
+    connect(m_undoStack, &QUndoStack::cleanChanged, this, [this](bool clean) {
+        QString title = "FGDBuilder";
+        if (!m_filePath.isEmpty()) title += " - " + QFileInfo(m_filePath).fileName();
+        if (!clean) title += " *";
+        setWindowTitle(title);
+    });
+    DiscordRPC::instance().setActivity("No file open", "FGDBuilder v1.1.0");
+}
+
+void MainWindow::closeEvent(QCloseEvent *event) {
+    if (!confirmDiscard()) {
+        event->ignore();
+        return;
+    }
+    QSettings settings("FGDBuilder", "FGDBuilder");
+    settings.setValue("recentFiles", m_recentFiles);
+    event->accept();
 }
 
 void MainWindow::setupUi() {
@@ -208,6 +255,11 @@ void MainWindow::setupUi() {
     QVBoxLayout *leftLayout = new QVBoxLayout(leftPanel);
     leftLayout->setContentsMargins(0,0,0,0);
     leftLayout->addWidget(new QLabel("Entities:"));
+
+    m_searchEdit = new QLineEdit;
+    m_searchEdit->setPlaceholderText("Search entities...");
+    leftLayout->addWidget(m_searchEdit);
+
     m_entityList = new QListWidget;
     m_entityList->setMinimumWidth(220);
     leftLayout->addWidget(m_entityList);
@@ -242,6 +294,8 @@ void MainWindow::setupUi() {
     QFont monoFont("Courier New", 9);
     monoFont.setStyleHint(QFont::Monospace);
     m_preview->setFont(monoFont);
+    m_preview->setStyleSheet("QTextEdit { background: #1e1e1e; color: #d4d4d4; }");
+    new FGDHighlighter(m_preview->document());
     rightLayout->addWidget(m_preview);
 
     splitter->addWidget(rightPanel);
@@ -259,6 +313,7 @@ void MainWindow::setupUi() {
     connect(downBtn, &QPushButton::clicked, this, &MainWindow::moveEntityDown);
     connect(m_entityList, &QListWidget::currentRowChanged, this, &MainWindow::onEntitySelectionChanged);
     connect(m_entityList, &QListWidget::itemDoubleClicked, this, &MainWindow::editEntity);
+    connect(m_searchEdit, &QLineEdit::textChanged, this, &MainWindow::onSearchTextChanged);
 }
 
 static QAction* makeAction(const QString &text, QObject *receiver, std::function<void()> slot, const QKeySequence &key = {}) {
@@ -272,15 +327,23 @@ void MainWindow::setupMenuBar() {
     QMenu *fileMenu = menuBar()->addMenu("&File");
     fileMenu->addAction(makeAction("&New", this, [this]{ newProject(); }, QKeySequence::New));
     fileMenu->addAction(makeAction("&Open...", this, [this]{ openProject(); }, QKeySequence::Open));
+    fileMenu->addAction(makeAction("&Import FGD...", this, [this]{ importFGD(); }, QKeySequence("Ctrl+I")));
     fileMenu->addSeparator();
     fileMenu->addAction(makeAction("&Save", this, [this]{ saveProject(); }, QKeySequence::Save));
     fileMenu->addAction(makeAction("Save &As...", this, [this]{ saveProjectAs(); }, QKeySequence::SaveAs));
     fileMenu->addSeparator();
     fileMenu->addAction(makeAction("&Export FGD...", this, [this]{ exportFGD(); }, QKeySequence("Ctrl+E")));
     fileMenu->addSeparator();
+    m_recentMenu = fileMenu->addMenu("Recent Files");
+    fileMenu->addSeparator();
     fileMenu->addAction(makeAction("E&xit", qApp, []{ qApp->quit(); }, QKeySequence::Quit));
 
     QMenu *editMenu = menuBar()->addMenu("&Edit");
+    editMenu->addAction(m_undoStack->createUndoAction(this, "&Undo"));
+    editMenu->actions().last()->setShortcut(QKeySequence::Undo);
+    editMenu->addAction(m_undoStack->createRedoAction(this, "&Redo"));
+    editMenu->actions().last()->setShortcut(QKeySequence::Redo);
+    editMenu->addSeparator();
     editMenu->addAction(makeAction("&Add Entity", this, [this]{ addEntity(); }, QKeySequence("Ctrl+N")));
     editMenu->addAction(makeAction("&Edit Entity", this, [this]{ editEntity(); }, QKeySequence("F2")));
     editMenu->addAction(makeAction("&Remove Entity", this, [this]{ removeEntity(); }, QKeySequence::Delete));
@@ -288,6 +351,8 @@ void MainWindow::setupMenuBar() {
     editMenu->addSeparator();
     editMenu->addAction(makeAction("Move &Up", this, [this]{ moveEntityUp(); }, QKeySequence("Ctrl+Up")));
     editMenu->addAction(makeAction("Move &Down", this, [this]{ moveEntityDown(); }, QKeySequence("Ctrl+Down")));
+    editMenu->addSeparator();
+    editMenu->addAction(makeAction("Sort A-Z", this, [this]{ sortEntitiesAZ(); }));
 
     QMenu *projectMenu = menuBar()->addMenu("&Project");
     projectMenu->addAction(makeAction("&Header Comment...", this, [this]{ editHeaderComment(); }));
@@ -295,6 +360,7 @@ void MainWindow::setupMenuBar() {
     projectMenu->addAction(makeAction("&@mapsize...", this, [this]{ editMapSize(); }));
     projectMenu->addAction(makeAction("@&MaterialExclusion...", this, [this]{ editMaterialExclusions(); }));
     projectMenu->addAction(makeAction("@&AutoVisGroup...", this, [this]{ editAutoVisGroups(); }));
+    projectMenu->addAction(makeAction("@&version...", this, [this]{ editFGDVersion(); }));
 
     QMenu *helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction(makeAction("&About FGDBuilder", this, [this]{ showAbout(); }));
@@ -306,7 +372,6 @@ void MainWindow::setupToolBar() {
     tb->addAction(QIcon(":/icons/new.png"), "New", this, &MainWindow::newProject);
     tb->addAction(QIcon(":/icons/open.png"), "Open", this, &MainWindow::openProject);
     tb->addAction(QIcon(":/icons/save.png"), "Save", this, &MainWindow::saveProject);
-    // tb->addSeparator();
     tb->addAction(QIcon(":/icons/export.png"), "Export FGD", this, &MainWindow::exportFGD);
     tb->addAction(QIcon(":/icons/add.png"), "Add Entity", this, &MainWindow::addEntity);
     tb->addAction(QIcon(":/icons/delete.png"), "Remove Entity", this, &MainWindow::removeEntity);
@@ -314,18 +379,34 @@ void MainWindow::setupToolBar() {
 }
 
 void MainWindow::refreshEntityList() {
-    int sel = m_entityList->currentRow();
+    QString filter = m_searchEdit ? m_searchEdit->text().trimmed().toLower() : QString();
+    int prevRealIndex = -1;
+    if (m_entityList->currentItem())
+        prevRealIndex = m_entityList->currentItem()->data(Qt::UserRole).toInt();
+
     m_entityList->clear();
-    for (auto &e : m_project.entities) {
+    for (int i = 0; i < m_project.entities.size(); ++i) {
+        const FGDEntity &e = m_project.entities[i];
         QString label = classTypeToString(e.classType) + " " + e.className;
-        m_entityList->addItem(label);
+        if (!filter.isEmpty() && !label.toLower().contains(filter)) continue;
+        QListWidgetItem *item = new QListWidgetItem(label);
+        item->setData(Qt::UserRole, i);
+        m_entityList->addItem(item);
+        if (i == prevRealIndex) m_entityList->setCurrentItem(item);
     }
-    if (sel >= 0 && sel < m_entityList->count()) m_entityList->setCurrentRow(sel);
     updatePreview();
 }
 
+int MainWindow::realIndexFromRow(int row) const {
+    if (row < 0 || row >= m_entityList->count()) return -1;
+    return m_entityList->item(row)->data(Qt::UserRole).toInt();
+}
+
+void MainWindow::onSearchTextChanged(const QString &) {
+    refreshEntityList();
+}
+
 void MainWindow::setWindowModified_(bool modified) {
-    m_modified = modified;
     QString title = "FGDBuilder";
     if (!m_filePath.isEmpty()) title += " - " + QFileInfo(m_filePath).fileName();
     if (modified) title += " *";
@@ -333,7 +414,7 @@ void MainWindow::setWindowModified_(bool modified) {
 }
 
 bool MainWindow::confirmDiscard() {
-    if (!m_modified) return true;
+    if (m_undoStack->isClean()) return true;
     auto r = QMessageBox::question(this, "Unsaved Changes",
         "You have unsaved changes. Discard them?",
         QMessageBox::Yes | QMessageBox::No);
@@ -344,9 +425,11 @@ void MainWindow::newProject() {
     if (!confirmDiscard()) return;
     m_project = FGDProject();
     m_filePath.clear();
+    m_undoStack->clear();
     refreshEntityList();
     setWindowModified_(false);
     m_statusLabel->setText("New project created.");
+    DiscordRPC::instance().setActivity("New project", "FGDBuilder v1.1.0");
 }
 
 void MainWindow::loadFromFile(const QString &path) {
@@ -361,6 +444,7 @@ void MainWindow::loadFromFile(const QString &path) {
     FGDProject proj;
     proj.headerComment = root["headerComment"].toString();
     for (auto v : root["includes"].toArray()) proj.includes << v.toString();
+    proj.fgdVersion = root["fgdVersion"].toInt(0);
     proj.mapsizeMin = root["mapsizeMin"].toInt(-16384);
     proj.mapsizeMax = root["mapsizeMax"].toInt(16384);
     proj.useMapsSize = root["useMapsSize"].toBool(false);
@@ -377,9 +461,13 @@ void MainWindow::loadFromFile(const QString &path) {
     }
     m_project = proj;
     m_filePath = path;
+    m_undoStack->clear();
+    m_undoStack->setClean();
+    addRecentFile(path);
     refreshEntityList();
     setWindowModified_(false);
     m_statusLabel->setText("Loaded: " + path);
+    DiscordRPC::instance().setActivity(QFileInfo(path).fileName(), "FGDBuilder v1.1.0");
 }
 
 void MainWindow::saveToFile(const QString &path) {
@@ -388,6 +476,7 @@ void MainWindow::saveToFile(const QString &path) {
     QJsonArray incs;
     for (auto &s : m_project.includes) incs.append(s);
     root["includes"] = incs;
+    root["fgdVersion"] = m_project.fgdVersion;
     root["mapsizeMin"] = m_project.mapsizeMin;
     root["mapsizeMax"] = m_project.mapsizeMax;
     root["useMapsSize"] = m_project.useMapsSize;
@@ -415,14 +504,55 @@ void MainWindow::saveToFile(const QString &path) {
     f.write(QJsonDocument(root).toJson());
     f.close();
     m_filePath = path;
+    m_undoStack->setClean();
+    addRecentFile(path);
     setWindowModified_(false);
     m_statusLabel->setText("Saved: " + path);
+    DiscordRPC::instance().setActivity(QFileInfo(path).fileName(), "FGDBuilder v1.1.0");
 }
 
 void MainWindow::openProject() {
     if (!confirmDiscard()) return;
     QString path = QFileDialog::getOpenFileName(this, "Open Project", "", "FGDBuilder Project (*.fgdbp);;All Files (*)");
     if (!path.isEmpty()) loadFromFile(path);
+}
+
+void MainWindow::importFGD() {
+    QString path = QFileDialog::getOpenFileName(this, "Import FGD", "", "Forge Game Data (*.fgd);;All Files (*)");
+    if (path.isEmpty()) return;
+    QString err;
+    FGDProject imported = FGDImporter::importFromFile(path, err);
+    if (!err.isEmpty()) {
+        QMessageBox::warning(this, "Import Error", err);
+        return;
+    }
+    QString msg = QString("Imported %1 entities from:\n%2\n\nReplace current project or merge into it?")
+        .arg(imported.entities.size()).arg(path);
+    QMessageBox dlg(this);
+    dlg.setWindowTitle("Import FGD");
+    dlg.setText(msg);
+    QPushButton *replaceBtn = dlg.addButton("Replace", QMessageBox::AcceptRole);
+    QPushButton *mergeBtn   = dlg.addButton("Merge",   QMessageBox::AcceptRole);
+    dlg.addButton("Cancel", QMessageBox::RejectRole);
+    dlg.exec();
+    if (dlg.clickedButton() == replaceBtn) {
+        if (!confirmDiscard()) return;
+        m_project = imported;
+        m_filePath.clear();
+        m_undoStack->clear();
+        refreshEntityList();
+        m_undoStack->resetClean();
+        setWindowModified_(true);
+        m_statusLabel->setText("Imported (replace): " + path);
+        DiscordRPC::instance().setActivity("Imported: " + QFileInfo(path).fileName(), "FGDBuilder v1.1.0");
+    } else if (dlg.clickedButton() == mergeBtn) {
+        auto before = m_project.entities;
+        auto after = m_project.entities;
+        for (auto &e : imported.entities) after.append(e);
+        m_undoStack->push(new EntityListCommand(&m_project.entities, before, after, "Import FGD (merge)",
+            [this]{ refreshEntityList(); }));
+        m_statusLabel->setText("Imported (merge): " + path);
+    }
 }
 
 void MainWindow::saveProject() {
@@ -435,8 +565,51 @@ void MainWindow::saveProjectAs() {
     if (!path.isEmpty()) saveToFile(path);
 }
 
+QString MainWindow::defaultExportPath() const {
+    if (!m_filePath.isEmpty()) {
+        QFileInfo fi(m_filePath);
+        return fi.absoluteDir().filePath(fi.baseName() + ".fgd");
+    }
+    return QString();
+}
+
+static QStringList validateProject(const FGDProject &proj) {
+    QStringList errors;
+    QSet<QString> names;
+    QSet<QString> allNames;
+    for (auto &e : proj.entities) allNames.insert(e.className);
+    for (auto &e : proj.entities) {
+        if (e.className.isEmpty()) { errors << "Entity with empty class name found."; continue; }
+        if (names.contains(e.className))
+            errors << "Duplicate entity name: " + e.className;
+        names.insert(e.className);
+        for (auto &base : e.bases) {
+            if (!allNames.contains(base))
+                errors << e.className + ": base class '" + base + "' not found in project.";
+        }
+        for (auto &kv : e.keyvalues) {
+            if (kv.type == "flags") {
+                for (auto &fi : kv.flagItems) {
+                    bool ok;
+                    long long val = fi.first.toLongLong(&ok);
+                    if (!ok || val <= 0 || (val & (val - 1)) != 0)
+                        errors << e.className + ": flag value '" + fi.first + "' is not a power of two.";
+                }
+            }
+        }
+    }
+    return errors;
+}
+
 void MainWindow::exportFGD() {
-    QString path = QFileDialog::getSaveFileName(this, "Export FGD", "", "Forge Game Data (*.fgd);;All Files (*)");
+    QStringList validationErrors = validateProject(m_project);
+    if (!validationErrors.isEmpty()) {
+        QString msg = "The following issues were found:\n\n" + validationErrors.join("\n") + "\n\nExport anyway?";
+        auto r = QMessageBox::warning(this, "Validation Warnings", msg, QMessageBox::Yes | QMessageBox::No);
+        if (r != QMessageBox::Yes) return;
+    }
+    QString defPath = defaultExportPath();
+    QString path = QFileDialog::getSaveFileName(this, "Export FGD", defPath, "Forge Game Data (*.fgd);;All Files (*)");
     if (path.isEmpty()) return;
     QString content = FGDGenerator::generate(m_project);
     QFile f(path);
@@ -461,81 +634,110 @@ void MainWindow::addEntity() {
     if (dlg.exec() == QDialog::Accepted) {
         FGDEntity e = dlg.getEntity();
         if (e.className.isEmpty()) { QMessageBox::warning(this, "Warning", "Entity class name cannot be empty."); return; }
-        m_project.entities.append(e);
-        refreshEntityList();
-        m_entityList->setCurrentRow(m_project.entities.size()-1);
-        setWindowModified_(true);
+        auto before = m_project.entities;
+        auto after = m_project.entities;
+        after.append(e);
+        int newRow = after.size() - 1;
+        m_undoStack->push(new EntityListCommand(&m_project.entities, before, after, "Add Entity",
+            [this, newRow]{ refreshEntityList(); for (int i = 0; i < m_entityList->count(); ++i) { if (m_entityList->item(i)->data(Qt::UserRole).toInt() == newRow) { m_entityList->setCurrentRow(i); break; } } }));
     }
 }
 
 void MainWindow::editEntity() {
     int row = m_entityList->currentRow();
-    if (row < 0 || row >= m_project.entities.size()) return;
+    int realIdx = realIndexFromRow(row);
+    if (realIdx < 0) return;
     QStringList bases;
     for (auto &e : m_project.entities)
         if (e.classType == EntityClassType::BaseClass)
             bases << e.className;
-    EntityEditor dlg(this, m_project.entities[row], bases);
+    EntityEditor dlg(this, m_project.entities[realIdx], bases);
     if (dlg.exec() == QDialog::Accepted) {
         FGDEntity e = dlg.getEntity();
         if (e.className.isEmpty()) { QMessageBox::warning(this, "Warning", "Entity class name cannot be empty."); return; }
-        m_project.entities[row] = e;
-        refreshEntityList();
-        m_entityList->setCurrentRow(row);
-        setWindowModified_(true);
+        auto before = m_project.entities;
+        auto after = m_project.entities;
+        after[realIdx] = e;
+        m_undoStack->push(new EntityListCommand(&m_project.entities, before, after, "Edit Entity",
+            [this, realIdx]{ refreshEntityList(); for (int i = 0; i < m_entityList->count(); ++i) { if (m_entityList->item(i)->data(Qt::UserRole).toInt() == realIdx) { m_entityList->setCurrentRow(i); break; } } }));
     }
 }
 
 void MainWindow::removeEntity() {
     int row = m_entityList->currentRow();
-    if (row < 0 || row >= m_project.entities.size()) return;
+    int realIdx = realIndexFromRow(row);
+    if (realIdx < 0) return;
     auto r = QMessageBox::question(this, "Remove Entity",
-        "Remove entity '" + m_project.entities[row].className + "'?",
+        "Remove entity '" + m_project.entities[realIdx].className + "'?",
         QMessageBox::Yes | QMessageBox::No);
     if (r != QMessageBox::Yes) return;
-    m_project.entities.removeAt(row);
-    refreshEntityList();
-    setWindowModified_(true);
+    auto before = m_project.entities;
+    auto after = m_project.entities;
+    after.removeAt(realIdx);
+    m_undoStack->push(new EntityListCommand(&m_project.entities, before, after, "Remove Entity",
+        [this]{ refreshEntityList(); }));
 }
 
 void MainWindow::duplicateEntity() {
     int row = m_entityList->currentRow();
-    if (row < 0 || row >= m_project.entities.size()) return;
-    FGDEntity copy = m_project.entities[row];
+    int realIdx = realIndexFromRow(row);
+    if (realIdx < 0) return;
+    FGDEntity copy = m_project.entities[realIdx];
     copy.className += "_copy";
-    m_project.entities.insert(row+1, copy);
-    refreshEntityList();
-    m_entityList->setCurrentRow(row+1);
-    setWindowModified_(true);
+    auto before = m_project.entities;
+    auto after = m_project.entities;
+    after.insert(realIdx + 1, copy);
+    int newReal = realIdx + 1;
+    m_undoStack->push(new EntityListCommand(&m_project.entities, before, after, "Duplicate Entity",
+        [this, newReal]{ refreshEntityList(); for (int i = 0; i < m_entityList->count(); ++i) { if (m_entityList->item(i)->data(Qt::UserRole).toInt() == newReal) { m_entityList->setCurrentRow(i); break; } } }));
 }
 
 void MainWindow::moveEntityUp() {
     int row = m_entityList->currentRow();
-    if (row <= 0 || row >= m_project.entities.size()) return;
-    m_project.entities.swapItemsAt(row, row-1);
-    refreshEntityList();
-    m_entityList->setCurrentRow(row-1);
-    setWindowModified_(true);
+    int realIdx = realIndexFromRow(row);
+    if (realIdx <= 0) return;
+    auto before = m_project.entities;
+    auto after = m_project.entities;
+    after.swapItemsAt(realIdx, realIdx - 1);
+    int newReal = realIdx - 1;
+    m_undoStack->push(new EntityListCommand(&m_project.entities, before, after, "Move Entity Up",
+        [this, newReal]{ refreshEntityList(); for (int i = 0; i < m_entityList->count(); ++i) { if (m_entityList->item(i)->data(Qt::UserRole).toInt() == newReal) { m_entityList->setCurrentRow(i); break; } } }));
 }
 
 void MainWindow::moveEntityDown() {
     int row = m_entityList->currentRow();
-    if (row < 0 || row >= m_project.entities.size()-1) return;
-    m_project.entities.swapItemsAt(row, row+1);
-    refreshEntityList();
-    m_entityList->setCurrentRow(row+1);
-    setWindowModified_(true);
+    int realIdx = realIndexFromRow(row);
+    if (realIdx < 0 || realIdx >= m_project.entities.size() - 1) return;
+    auto before = m_project.entities;
+    auto after = m_project.entities;
+    after.swapItemsAt(realIdx, realIdx + 1);
+    int newReal = realIdx + 1;
+    m_undoStack->push(new EntityListCommand(&m_project.entities, before, after, "Move Entity Down",
+        [this, newReal]{ refreshEntityList(); for (int i = 0; i < m_entityList->count(); ++i) { if (m_entityList->item(i)->data(Qt::UserRole).toInt() == newReal) { m_entityList->setCurrentRow(i); break; } } }));
+}
+
+void MainWindow::sortEntitiesAZ() {
+    auto before = m_project.entities;
+    auto after = m_project.entities;
+    std::sort(after.begin(), after.end(), [](const FGDEntity &a, const FGDEntity &b){
+        return a.className.toLower() < b.className.toLower();
+    });
+    m_undoStack->push(new EntityListCommand(&m_project.entities, before, after, "Sort Entities A-Z",
+        [this]{ refreshEntityList(); }));
 }
 
 void MainWindow::onEntitySelectionChanged() {
     updatePreview();
+    QString fileLabel = m_filePath.isEmpty() ? "Untitled" : QFileInfo(m_filePath).fileName();
+    DiscordRPC::instance().setActivity(fileLabel, "FGDBuilder v1.1.0");
 }
 
 void MainWindow::updatePreview() {
     int row = m_entityList->currentRow();
-    if (row >= 0 && row < m_project.entities.size()) {
+    int realIdx = realIndexFromRow(row);
+    if (realIdx >= 0) {
         FGDProject single;
-        single.entities.append(m_project.entities[row]);
+        single.entities.append(m_project.entities[realIdx]);
         m_preview->setPlainText(FGDGenerator::generate(single).trimmed());
     } else {
         m_preview->setPlainText(FGDGenerator::generate(m_project));
@@ -546,7 +748,7 @@ void MainWindow::editIncludes() {
     IncludeManager dlg(this, m_project.includes);
     if (dlg.exec() == QDialog::Accepted) {
         m_project.includes = dlg.getIncludes();
-        setWindowModified_(true);
+        m_undoStack->resetClean();
         updatePreview();
     }
 }
@@ -555,7 +757,7 @@ void MainWindow::editMaterialExclusions() {
     BaseClassManager dlg(this, m_project.materialExclusions);
     if (dlg.exec() == QDialog::Accepted) {
         m_project.materialExclusions = dlg.getExclusions();
-        setWindowModified_(true);
+        m_undoStack->resetClean();
         updatePreview();
     }
 }
@@ -564,7 +766,7 @@ void MainWindow::editAutoVisGroups() {
     AutoVisGroupEditor dlg(this, m_project.autoVisGroups);
     if (dlg.exec() == QDialog::Accepted) {
         m_project.autoVisGroups = dlg.getGroups();
-        setWindowModified_(true);
+        m_undoStack->resetClean();
         updatePreview();
     }
 }
@@ -575,7 +777,7 @@ void MainWindow::editMapSize() {
         m_project.useMapsSize = dlg.isEnabled();
         m_project.mapsizeMin = dlg.getMin();
         m_project.mapsizeMax = dlg.getMax();
-        setWindowModified_(true);
+        m_undoStack->resetClean();
         updatePreview();
     }
 }
@@ -586,14 +788,26 @@ void MainWindow::editHeaderComment() {
         "Comment lines at the top of the FGD file:", m_project.headerComment, &ok);
     if (ok) {
         m_project.headerComment = text;
-        setWindowModified_(true);
+        m_undoStack->resetClean();
+        updatePreview();
+    }
+}
+
+void MainWindow::editFGDVersion() {
+    bool ok;
+    int v = QInputDialog::getInt(this, "@version",
+        "FGD version number (0 = omit @version from output):",
+        m_project.fgdVersion, 0, 9999, 1, &ok);
+    if (ok) {
+        m_project.fgdVersion = v;
+        m_undoStack->resetClean();
         updatePreview();
     }
 }
 
 void MainWindow::showAbout() {
     QMessageBox::about(this, "About FGDBuilder",
-        "<b>FGDBuilder v1.0.0</b><br>"
+        "<b>FGDBuilder v1.1.0</b><br>"
         "Build date: " __DATE__ "<br><br>"
         "A tool for creating Forge Game Data (.fgd) files.<br><br>"
         "Supports @PointClass, @SolidClass, @NPCClass,<br>"
@@ -601,4 +815,38 @@ void MainWindow::showAbout() {
         "@include, @mapsize, @MaterialExclusion, @AutoVisGroup.<br><br>"
         "FGD files define entities for use in Valve's Hammer editor.<br><br>"
         "<a href='https://github.com/bswap64/fgdbuilder'>https://github.com/bswap64/fgdbuilder</a>");
+}
+
+void MainWindow::addRecentFile(const QString &path) {
+    m_recentFiles.removeAll(path);
+    m_recentFiles.prepend(path);
+    while (m_recentFiles.size() > MaxRecentFiles) m_recentFiles.removeLast();
+    updateRecentFilesMenu();
+}
+
+void MainWindow::updateRecentFilesMenu() {
+    if (!m_recentMenu) return;
+    m_recentMenu->clear();
+    if (m_recentFiles.isEmpty()) {
+        m_recentMenu->addAction("(empty)")->setEnabled(false);
+        return;
+    }
+    for (const QString &path : m_recentFiles) {
+        QFileInfo fi(path);
+        QString label = fi.fileName() + "  [" + fi.absolutePath() + "]";
+        QAction *a = m_recentMenu->addAction(label);
+        a->setToolTip(path);
+        connect(a, &QAction::triggered, this, [this, path]{ openRecentFile(path); });
+    }
+}
+
+void MainWindow::openRecentFile(const QString &path) {
+    if (!confirmDiscard()) return;
+    if (!QFile::exists(path)) {
+        QMessageBox::warning(this, "File Not Found", "File not found:\n" + path);
+        m_recentFiles.removeAll(path);
+        updateRecentFilesMenu();
+        return;
+    }
+    loadFromFile(path);
 }
