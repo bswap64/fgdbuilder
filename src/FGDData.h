@@ -94,6 +94,7 @@ struct FGDProject {
     int mapsizeMin = -16384;
     int mapsizeMax = 16384;
     bool useMapsSize = false;
+    int fgdVersion = 0;
     QList<FGDEntity> entities;
     QList<FGDAutoVisGroup> autoVisGroups;
     QStringList materialExclusions;
